@@ -1,4 +1,4 @@
-pub trait Guard<Upd> {
+pub trait Guard<Upd: ?Sized> {
     fn check(&self, update: &Upd) -> bool;
 }
 
@@ -26,6 +26,13 @@ impl<Upd> Guards<Upd> {
     {
         self.guards.push(Box::new(data));
         self
+    }
+
+    pub fn add_guard<T>(&mut self, data: T)
+    where
+        T: Guard<Upd> + 'static,
+    {
+        self.guards.push(Box::new(data));
     }
 
     pub fn check(&self, update: &Upd) -> bool {

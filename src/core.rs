@@ -14,7 +14,7 @@ pub use {
     dispatch_error::{DispatchError, HandleResult},
     dispatcher::{Dispatcher, DispatcherBuilder},
     error_handler::ErrorHandler,
-    guard::Guards,
+    guard::{Guards, Guard},
     handler::{FnHandlerWrapper, MapParser, Parser, ParserHandler, ParserOut, RecombineFrom},
     handler::{HandleFuture, Handler, IntoHandler},
 };
