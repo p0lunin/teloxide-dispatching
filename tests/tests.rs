@@ -1,23 +1,39 @@
+use std::convert::Infallible;
 use std::ops::Deref;
 use std::sync::Arc;
-use teloxide_dispatching::core::{Dispatcher, Guards, ParserHandler, Service};
+use teloxide_dispatching::core::{DispatcherBuilder, ParserHandler, ParserOut, RecombineFrom};
 use tokio::sync::Mutex;
+
+struct Nums(u32, u32, u32);
+
+impl<Parser> RecombineFrom<Parser> for Nums {
+    type From = u32;
+    type Rest = (u32, u32);
+
+    fn recombine(data: ParserOut<u32, (u32, u32)>) -> Nums {
+        let (a, (b, c)) = data.into_inner();
+        Nums(a, b, c)
+    }
+}
 
 #[tokio::test]
 async fn test() {
     let char = Arc::new(Mutex::new(None));
-    let dispatcher = Dispatcher::<String>::new().service(Service {
-        guards: Guards::new().add(|s: &String| s.is_ascii()),
-        handler: Arc::new(ParserHandler::new(|s: String| s.chars().next().unwrap(), {
-            let char = char.clone();
-            move |req: char| {
+    let dispatcher = DispatcherBuilder::<Nums, Infallible, _, _>::new()
+        .handle(ParserHandler::new(
+            |nums: Nums| Ok(ParserOut::new(nums.0, (nums.1, nums.2))),
+            {
                 let char = char.clone();
-                async move {
-                    *char.lock().await = Some(req);
+                move |req: u32| {
+                    let char = char.clone();
+                    async move {
+                        *char.lock().await = Some(req);
+                    }
                 }
-            }
-        })) as _,
-    });
-    dispatcher.dispatch_one(String::from("Hello")).await;
-    assert_eq!(char.lock().await.deref(), &Some('H'));
+            },
+        ))
+        .error_handler(|_| async { unreachable!() })
+        .build();
+    dispatcher.dispatch_one(Nums(1, 2, 3)).await;
+    assert_eq!(char.lock().await.deref(), &Some(1));
 }

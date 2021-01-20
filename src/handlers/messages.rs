@@ -1,6 +1,10 @@
 mod impls {
-    use crate::core::{Guards, Handler, HandlerInto, Service};
-    use crate::handlers::parser::{Initialized, NotInitialized, ParseUpdate, UpdateParser};
+    use crate::core::{
+        HandleResult, Handler, IntoHandler, MapParser, Parser, ParserHandler, ParserOut,
+        RecombineFrom,
+    };
+    use crate::handlers::parser::UpdateParser;
+    use crate::updates::UpdateRest;
     use std::future::Future;
     use std::marker::PhantomData;
     use teloxide_core::types::{Message, Update};
@@ -27,17 +31,11 @@ mod impls {
     macro_rules! impl_parser {
         ($($ty:ident,)*) => {
             $(
-                impl ParseUpdate<teloxide_core::types::Message> for parser::$ty {
-                    type Upd = teloxide_core::types::Message;
-
-                    fn check(update: &teloxide_core::types::Message) -> bool {
-                        matches!(update.kind, teloxide_core::types::MessageKind::$ty(_))
-                    }
-
-                    fn parse(update: teloxide_core::types::Message) -> Self::Upd {
+                impl Parser<Message, Message, ()> for parser::$ty {
+                    fn parse(&self, update: Message) -> Result<ParserOut<Message, ()>, Message> {
                         match &update.kind {
-                            teloxide_core::types::MessageKind::$ty(_) => update,
-                            _ => unreachable!("We already checks that message is {}", stringify!($ty)),
+                            teloxide_core::types::MessageKind::$ty(_) => Ok(ParserOut::new(update, ())),
+                            _ => Err(update),
                         }
                     }
                 }
@@ -63,163 +61,135 @@ mod impls {
         PassportData,
         Dice,
     );
-
-    pub struct MessageParser<ParentParser, Parser, Init>
+    impl<Parser1, Parser2>
+        RecombineFrom<MapParser<Parser1, Parser2, Message, UpdateRest, (), Message>> for Update
     where
-        ParentParser: ParseUpdate<Update, Upd = Message>,
+        Update: RecombineFrom<Parser1, From = Message, Rest = UpdateRest>,
     {
-        parent: Service<Update>,
-        service: Service<Message>,
-        phantom: PhantomData<(ParentParser, Parser, Init)>,
+        type From = Message;
+        type Rest = (UpdateRest, ());
+
+        fn recombine(info: ParserOut<Self::From, Self::Rest>) -> Self {
+            let (out, (rest1, _)) = info.into_inner();
+            <Update as RecombineFrom<Parser1>>::recombine(ParserOut::new(out, rest1))
+        }
     }
 
-    impl<ParentParser, Parser> MessageParser<ParentParser, Parser, NotInitialized>
+    pub struct MessageParser<ParentParser, ParserT, Err> {
+        parent: ParentParser,
+        parser: ParserT,
+        phantom: PhantomData<Err>,
+    }
+
+    impl<ParentParser, ParserT, Err> MessageParser<ParentParser, ParserT, Err>
     where
-        ParentParser: ParseUpdate<Update, Upd = Message>,
-        Parser: ParseUpdate<ParentParser::Upd> + 'static,
-        ParentParser::Upd: 'static,
+        ParentParser: Parser<Update, Message, UpdateRest>,
+        ParserT: Parser<Message, Message, ()> + 'static,
+        Update: RecombineFrom<ParentParser, From = Message, Rest = UpdateRest>,
     {
-        pub fn new(parent: Service<Update>) -> Self {
-            let service = Service::new(Guards::new().add(Parser::check), || async move {});
+        pub fn new(parent: ParentParser, parser: ParserT) -> Self {
             MessageParser {
                 parent,
-                service,
+                parser,
                 phantom: PhantomData,
             }
         }
 
-        pub fn to<F, H, Fut>(self, f: F) -> MessageParser<ParentParser, Parser, Initialized>
+        pub fn by<F, H, Fut>(
+            self,
+            f: F,
+        ) -> ParserHandler<
+            MapParser<ParentParser, ParserT, Message, UpdateRest, (), Message>,
+            Update,
+            Message,
+            (UpdateRest, ()),
+            Err,
+            H,
+            Fut,
+        >
         where
-            H: Handler<Message, Fut> + 'static,
-            F: HandlerInto<H>,
-            Fut: Future<Output = ()> + Send + 'static,
+            H: Handler<Message, Err, Fut> + 'static,
+            F: IntoHandler<H>,
+            Fut: Future + Send + 'static,
+            Fut::Output: Into<HandleResult<Err>>,
         {
-            let MessageParser {
-                parent,
-                service: Service { guards, .. },
-                ..
-            } = self;
-            let handler = f.into_handler();
-            let service = Service::new(guards, move |update: ParentParser::Upd| {
-                handler.handle(update)
-            });
-            MessageParser {
-                parent,
-                service,
-                phantom: PhantomData,
-            }
+            let MessageParser { parent, parser, .. } = self;
+            let parser = MapParser::new(parent, parser);
+            ParserHandler::new(parser, f)
         }
     }
 
-    impl<ParentParser, Parser> Into<Service<Update>>
-        for MessageParser<ParentParser, Parser, Initialized>
+    impl<ParserT, Err> UpdateParser<Update, Message, UpdateRest, Err, ParserT>
     where
-        ParentParser: ParseUpdate<Update, Upd = Message>,
+        ParserT: Parser<Update, Message, UpdateRest>,
+        Update: RecombineFrom<ParserT, From = Message, Rest = UpdateRest>,
     {
-        fn into(self) -> Service<Update> {
-            let MessageParser {
-                parent,
-                service: message_service,
-                ..
-            } = self;
-            let Service { guards, .. } = parent;
-            let Service {
-                guards: message_guards,
-                handler,
-            } = message_service;
-            Service::new(guards, move |upd: Update| {
-                let mes = ParentParser::parse(upd);
-                if message_guards.check(&mes) {
-                    futures::future::Either::Left(handler.handle(mes))
-                } else {
-                    futures::future::Either::Right(async move {})
-                }
-            })
-        }
-    }
-
-    impl<Parser> UpdateParser<Update, Parser, NotInitialized>
-    where
-        Parser: ParseUpdate<Update, Upd = Message>,
-    {
-        pub fn common(self) -> MessageParser<Parser, parser::Common, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn common(self) -> MessageParser<ParserT, parser::Common, Err> {
+            MessageParser::new(self.into_inner(), parser::Common)
         }
 
-        pub fn new_chat_members(
-            self,
-        ) -> MessageParser<Parser, parser::NewChatMembers, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn new_chat_members(self) -> MessageParser<ParserT, parser::NewChatMembers, Err> {
+            MessageParser::new(self.into_inner(), parser::NewChatMembers)
         }
 
-        pub fn left_chat_member(
-            self,
-        ) -> MessageParser<Parser, parser::LeftChatMember, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn left_chat_member(self) -> MessageParser<ParserT, parser::LeftChatMember, Err> {
+            MessageParser::new(self.into_inner(), parser::LeftChatMember)
         }
 
-        pub fn new_chat_title(self) -> MessageParser<Parser, parser::NewChatTitle, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn new_chat_title(self) -> MessageParser<ParserT, parser::NewChatTitle, Err> {
+            MessageParser::new(self.into_inner(), parser::NewChatTitle)
         }
 
-        pub fn new_chat_photo(self) -> MessageParser<Parser, parser::NewChatPhoto, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn new_chat_photo(self) -> MessageParser<ParserT, parser::NewChatPhoto, Err> {
+            MessageParser::new(self.into_inner(), parser::NewChatPhoto)
         }
 
-        pub fn delete_chat_photo(
-            self,
-        ) -> MessageParser<Parser, parser::DeleteChatPhoto, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn delete_chat_photo(self) -> MessageParser<ParserT, parser::DeleteChatPhoto, Err> {
+            MessageParser::new(self.into_inner(), parser::DeleteChatPhoto)
         }
 
-        pub fn group_chat_created(
-            self,
-        ) -> MessageParser<Parser, parser::GroupChatCreated, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn group_chat_created(self) -> MessageParser<ParserT, parser::GroupChatCreated, Err> {
+            MessageParser::new(self.into_inner(), parser::GroupChatCreated)
         }
 
         pub fn supergroup_chat_created(
             self,
-        ) -> MessageParser<Parser, parser::SupergroupChatCreated, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        ) -> MessageParser<ParserT, parser::SupergroupChatCreated, Err> {
+            MessageParser::new(self.into_inner(), parser::SupergroupChatCreated)
         }
 
         pub fn channel_chat_created(
             self,
-        ) -> MessageParser<Parser, parser::ChannelChatCreated, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        ) -> MessageParser<ParserT, parser::ChannelChatCreated, Err> {
+            MessageParser::new(self.into_inner(), parser::ChannelChatCreated)
         }
 
-        pub fn migrate(self) -> MessageParser<Parser, parser::Migrate, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn migrate(self) -> MessageParser<ParserT, parser::Migrate, Err> {
+            MessageParser::new(self.into_inner(), parser::Migrate)
         }
 
-        pub fn pinned(self) -> MessageParser<Parser, parser::Pinned, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn pinned(self) -> MessageParser<ParserT, parser::Pinned, Err> {
+            MessageParser::new(self.into_inner(), parser::Pinned)
         }
 
-        pub fn invoice(self) -> MessageParser<Parser, parser::Invoice, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn invoice(self) -> MessageParser<ParserT, parser::Invoice, Err> {
+            MessageParser::new(self.into_inner(), parser::Invoice)
         }
 
-        pub fn successful_payment(
-            self,
-        ) -> MessageParser<Parser, parser::SuccessfulPayment, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn successful_payment(self) -> MessageParser<ParserT, parser::SuccessfulPayment, Err> {
+            MessageParser::new(self.into_inner(), parser::SuccessfulPayment)
         }
 
-        pub fn connected_website(
-            self,
-        ) -> MessageParser<Parser, parser::ConnectedWebsite, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn connected_website(self) -> MessageParser<ParserT, parser::ConnectedWebsite, Err> {
+            MessageParser::new(self.into_inner(), parser::ConnectedWebsite)
         }
 
-        pub fn passport_data(self) -> MessageParser<Parser, parser::PassportData, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn passport_data(self) -> MessageParser<ParserT, parser::PassportData, Err> {
+            MessageParser::new(self.into_inner(), parser::PassportData)
         }
 
-        pub fn dice(self) -> MessageParser<Parser, parser::Dice, NotInitialized> {
-            MessageParser::new(self.into_inner())
+        pub fn dice(self) -> MessageParser<ParserT, parser::Dice, Err> {
+            MessageParser::new(self.into_inner(), parser::Dice)
         }
     }
 }

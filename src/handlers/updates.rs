@@ -1,58 +1,68 @@
-use crate::handlers::parser::{NotInitialized, UpdateParser};
-use impls::parser;
-use teloxide_core::types::Update;
+use crate::handlers::parser::UpdateParser;
+use teloxide_core::{types, types::Update};
 
-pub fn any() -> UpdateParser<Update, parser::Update, NotInitialized> {
-    UpdateParser::new()
+pub(crate) use impls::{parser, UpdateRest};
+
+pub fn any<Err>() -> UpdateParser<Update, Update, (), Err, parser::Update> {
+    UpdateParser::new(parser::Update)
 }
 
-pub fn message() -> UpdateParser<Update, parser::Message, NotInitialized> {
-    UpdateParser::new()
+pub fn message<Err>() -> UpdateParser<Update, types::Message, UpdateRest, Err, parser::Message> {
+    UpdateParser::new(parser::Message)
 }
 
-pub fn edited_message() -> UpdateParser<Update, parser::EditedMessage, NotInitialized> {
-    UpdateParser::new()
+pub fn edited_message<Err>(
+) -> UpdateParser<Update, types::Message, UpdateRest, Err, parser::EditedMessage> {
+    UpdateParser::new(parser::EditedMessage)
 }
 
-pub fn channel_post() -> UpdateParser<Update, parser::ChannelPost, NotInitialized> {
-    UpdateParser::new()
+pub fn channel_post<Err>(
+) -> UpdateParser<Update, types::Message, UpdateRest, Err, parser::ChannelPost> {
+    UpdateParser::new(parser::ChannelPost)
 }
 
-pub fn edited_channel_post() -> UpdateParser<Update, parser::EditedChannelPost, NotInitialized> {
-    UpdateParser::new()
+pub fn edited_channel_post<Err>(
+) -> UpdateParser<Update, types::Message, UpdateRest, Err, parser::EditedChannelPost> {
+    UpdateParser::new(parser::EditedChannelPost)
 }
 
-pub fn inline_query() -> UpdateParser<Update, parser::InlineQuery, NotInitialized> {
-    UpdateParser::new()
+pub fn inline_query<Err>(
+) -> UpdateParser<Update, types::InlineQuery, UpdateRest, Err, parser::InlineQuery> {
+    UpdateParser::new(parser::InlineQuery)
 }
 
-pub fn chosen_inline_result() -> UpdateParser<Update, parser::ChosenInlineResult, NotInitialized> {
-    UpdateParser::new()
+pub fn chosen_inline_result<Err>(
+) -> UpdateParser<Update, types::ChosenInlineResult, UpdateRest, Err, parser::ChosenInlineResult> {
+    UpdateParser::new(parser::ChosenInlineResult)
 }
 
-pub fn callback_query() -> UpdateParser<Update, parser::CallbackQuery, NotInitialized> {
-    UpdateParser::new()
+pub fn callback_query<Err>(
+) -> UpdateParser<Update, types::CallbackQuery, UpdateRest, Err, parser::CallbackQuery> {
+    UpdateParser::new(parser::CallbackQuery)
 }
 
-pub fn shipping_query() -> UpdateParser<Update, parser::ShippingQuery, NotInitialized> {
-    UpdateParser::new()
+pub fn shipping_query<Err>(
+) -> UpdateParser<Update, types::ShippingQuery, UpdateRest, Err, parser::ShippingQuery> {
+    UpdateParser::new(parser::ShippingQuery)
 }
 
-pub fn pre_checkout_query() -> UpdateParser<Update, parser::PreCheckoutQuery, NotInitialized> {
-    UpdateParser::new()
+pub fn pre_checkout_query<Err>(
+) -> UpdateParser<Update, types::PreCheckoutQuery, UpdateRest, Err, parser::PreCheckoutQuery> {
+    UpdateParser::new(parser::PreCheckoutQuery)
 }
 
-pub fn poll() -> UpdateParser<Update, parser::Poll, NotInitialized> {
-    UpdateParser::new()
+pub fn poll<Err>() -> UpdateParser<Update, types::Poll, UpdateRest, Err, parser::Poll> {
+    UpdateParser::new(parser::Poll)
 }
 
-pub fn poll_answer() -> UpdateParser<Update, parser::PollAnswer, NotInitialized> {
-    UpdateParser::new()
+pub fn poll_answer<Err>(
+) -> UpdateParser<Update, types::PollAnswer, UpdateRest, Err, parser::PollAnswer> {
+    UpdateParser::new(parser::PollAnswer)
 }
 
 mod impls {
-    use crate::handlers::parser::ParseUpdate;
-    use teloxide_core::types::Update;
+    use crate::core::{Parser, ParserOut, RecombineFrom};
+    use teloxide_core::types::{Update, UpdateKind};
 
     pub(crate) mod parser {
         pub struct Update;
@@ -69,20 +79,30 @@ mod impls {
         pub struct PollAnswer;
     }
 
+    pub struct UpdateRest(i32);
+
     macro_rules! impl_parser {
         ($(($ty:ident, $teloxide_ty:ident),)*) => {
             $(
-                impl ParseUpdate<teloxide_core::types::Update> for parser::$ty {
-                    type Upd = teloxide_core::types::$teloxide_ty;
+                impl RecombineFrom<parser::$ty> for Update {
+                    type From = teloxide_core::types::$teloxide_ty;
+                    type Rest = UpdateRest;
 
-                    fn check(update: &Update) -> bool {
-                        matches!(update.kind, teloxide_core::types::UpdateKind::$ty(_))
+                    fn recombine(data: ParserOut<teloxide_core::types::$teloxide_ty, UpdateRest>) -> Update {
+                        let (kind, UpdateRest(id)) = data.into_inner();
+                        Update {
+                            id,
+                            kind: UpdateKind::$ty(kind),
+                        }
                     }
-
-                    fn parse(update: Update) -> Self::Upd {
-                        match update.kind {
-                            teloxide_core::types::UpdateKind::$ty(message) => message,
-                            _ => unreachable!("We already checks that update is {}", stringify!($ty)),
+                }
+                impl Parser<teloxide_core::types::Update, teloxide_core::types::$teloxide_ty, UpdateRest> for parser::$ty {
+                    fn parse(&self, update: Update) -> Result<ParserOut<teloxide_core::types::$teloxide_ty, UpdateRest>, Update> {
+                        let Update { id, kind } = update;
+                        let rest = UpdateRest(id);
+                        match kind {
+                            UpdateKind::$ty(message) => Ok(ParserOut::new(message, rest)),
+                            _ => Err(<Update as RecombineFrom<UpdateKind>>::recombine(ParserOut::new(kind, rest))),
                         }
                     }
                 }
@@ -90,15 +110,29 @@ mod impls {
         }
     }
 
-    impl ParseUpdate<Update> for parser::Update {
-        type Upd = teloxide_core::types::Update;
+    impl RecombineFrom<UpdateKind> for Update {
+        type From = UpdateKind;
+        type Rest = UpdateRest;
 
-        fn check(_: &Update) -> bool {
-            true
+        fn recombine(data: ParserOut<UpdateKind, UpdateRest>) -> Update {
+            let (kind, UpdateRest(id)) = data.into_inner();
+            Update { id, kind }
         }
+    }
 
-        fn parse(update: Update) -> Self::Upd {
+    impl RecombineFrom<parser::Update> for Update {
+        type From = Update;
+        type Rest = ();
+
+        fn recombine(data: ParserOut<Update, ()>) -> Update {
+            let (update, _) = data.into_inner();
             update
+        }
+    }
+
+    impl Parser<Update, Update, ()> for parser::Update {
+        fn parse(&self, update: Update) -> Result<ParserOut<Update, ()>, Update> {
+            Ok(ParserOut::new(update, ()))
         }
     }
 

@@ -1,7 +1,8 @@
+use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use teloxide_core::types::{CallbackQuery, Message, Update, UpdateKind};
-use teloxide_dispatching::core::Dispatcher;
+use teloxide_dispatching::core::DispatcherBuilder;
 use teloxide_dispatching::updates;
 
 #[tokio::test]
@@ -9,15 +10,14 @@ async fn test() {
     let handled = Arc::new(AtomicBool::new(false));
     let handled2 = handled.clone();
 
-    let dispatcher = Dispatcher::<Update>::new()
-        .service(updates::message().common().to(move |message: Message| {
+    let dispatcher = DispatcherBuilder::<Update, Infallible, _, _>::new()
+        .handle(updates::message().common().by(move |message: Message| {
             assert_eq!(message.text().unwrap(), "text");
             handled2.store(true, Ordering::SeqCst);
-            async move {}
         }))
-        .service(
-            updates::callback_query().to(move |_: CallbackQuery| async move { unreachable!() }),
-        );
+        .handle(updates::callback_query().by(move |_: CallbackQuery| unreachable!()))
+        .error_handler(|_| async { unreachable!() })
+        .build();
 
     let message = Update::new(0, UpdateKind::Message(text_message("text")));
 
