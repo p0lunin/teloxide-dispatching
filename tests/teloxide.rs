@@ -26,6 +26,32 @@ async fn test() {
     assert!(handled.load(Ordering::SeqCst));
 }
 
+#[tokio::test]
+async fn or_else() {
+    let in_or_else = Arc::new(AtomicBool::new(false));
+
+    let dispatcher = DispatcherBuilder::<Update, Infallible, _, _>::new()
+        .handle(updates::message()
+            .common()
+            .with_text(|text: &str| text == "text")
+            .or_else({
+                let in_or_else = in_or_else.clone();
+                move || {
+                    in_or_else.store(true, Ordering::SeqCst);
+                }
+            })
+            .by(|| unreachable!())
+        )
+        .error_handler(|_| async { unreachable!() })
+        .build();
+
+    let message = Update::new(0, UpdateKind::Message(text_message("not_text")));
+
+    dispatcher.dispatch_one(message).await;
+
+    assert!(in_or_else.load(Ordering::SeqCst));
+}
+
 fn text_message<T: Into<String>>(text: T) -> Message {
     use teloxide_core::types::ChatKind::Private;
     use teloxide_core::types::ForwardKind::Origin;

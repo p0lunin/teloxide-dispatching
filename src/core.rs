@@ -10,7 +10,7 @@ mod handler;
 mod store;
 
 pub use {
-    demux::Demux,
+    demux::{Demux, DemuxBuilder},
     dispatch_error::{DispatchError, HandleResult},
     dispatcher::{Dispatcher, DispatcherBuilder},
     error_handler::ErrorHandler,

@@ -1,11 +1,12 @@
 mod impls {
-    use crate::core::{HandleResult, Handler, IntoHandler, MapParser, Parser, ParserOut, RecombineFrom, Guards, Guard, HandleFuture, Demux};
+    use crate::core::{HandleResult, Handler, IntoHandler, MapParser, Parser, ParserOut, RecombineFrom, Guards, Guard, HandleFuture, Demux, DemuxBuilder};
     use crate::handlers::parser::UpdateParser;
     use crate::updates::UpdateRest;
     use std::future::Future;
     use std::marker::PhantomData;
     use teloxide_core::types::{Message, Update};
     use teloxide_core::types;
+    use futures::FutureExt;
 
     pub(crate) mod parser {
         pub struct Common;
@@ -73,33 +74,89 @@ mod impls {
         }
     }
 
-    pub struct MessageParser<ParentParser, ParserT, Err> {
-        parent: ParentParser,
-        parser: ParserT,
+    struct GuardsHandler {
         guards: Guards<Message>,
-        phantom: PhantomData<Err>,
     }
 
-    impl<ParentParser, ParserT, Err> MessageParser<ParentParser, ParserT, Err>
-    where
-        ParentParser: Parser<Update, Message, UpdateRest>,
-        ParserT: Parser<Message, Message, ()> + 'static,
-        Update: RecombineFrom<ParentParser, From = Message, Rest = UpdateRest>,
-    {
-        pub fn new(parent: ParentParser, parser: ParserT) -> Self {
-            MessageParser {
-                parent,
-                parser,
-                guards: Guards::new(),
-                phantom: PhantomData,
+    impl GuardsHandler {
+        pub fn new(guards: Guards<Message>) -> Self {
+            GuardsHandler { guards }
+        }
+    }
+
+    impl<Err> Handler<Message, Err, HandleFuture<Err>> for GuardsHandler {
+        fn handle(&self, data: Message) -> Result<HandleFuture<Err>, Message> {
+            match self.guards.check(&data) {
+                true => Err(data),
+                false => Ok(Box::pin(async { HandleResult::Ok }))
             }
         }
+    }
 
+    struct GuardHandler<Guard, Handler, Err, HFut> {
+        guard: Guard,
+        wrong_handler: Handler,
+        phantom: PhantomData<(Err, HFut)>,
+    }
+
+    impl<Guard, Handler, Err, HFut> GuardHandler<Guard, Handler, Err, HFut> {
+        pub fn new(guard: Guard, wrong_handler: Handler) -> Self {
+            GuardHandler { guard, wrong_handler, phantom: PhantomData }
+        }
+    }
+
+    impl<GuardT, HandlerT, Err, HFut> Handler<Message, Err, HandleFuture<Err>> for GuardHandler<GuardT, HandlerT, Err, HFut>
+    where
+        GuardT: Guard<Message>,
+        HandlerT: Handler<Message, Err, HFut>,
+        HFut: Future + Send + 'static,
+        HFut::Output: Into<HandleResult<Err>> + 'static,
+        Err: 'static,
+    {
+        fn handle(&self, data: Message) -> Result<HandleFuture<Err>, Message> {
+            match self.guard.check(&data) {
+                true => Err(data),
+                false => self.wrong_handler.handle(data).map(|fut| Box::pin(fut.map(Into::into)) as _)
+            }
+        }
+    }
+
+    pub struct MessageParser<UpdateParser, ParserT, Err> {
+        update_parser: UpdateParser,
+        parser: ParserT,
+        demux: DemuxBuilder<Message, Err>,
+        guards: Guards<Message>,
+        last_guard: Option<Box<dyn Guard<Message>>>
+    }
+
+    impl<UpdateParser, ParserT, Err> MessageParser<UpdateParser, ParserT, Err>
+    where
+        UpdateParser: Parser<Update, Message, UpdateRest>,
+        ParserT: Parser<Message, Message, ()> + 'static,
+        Update: RecombineFrom<UpdateParser, From = Message, Rest = UpdateRest>,
+    {
+        pub fn new(update_parser: UpdateParser, parser: ParserT) -> Self {
+            MessageParser {
+                update_parser,
+                parser,
+                demux: DemuxBuilder::new(),
+                guards: Guards::new(),
+                last_guard: None,
+            }
+        }
+    }
+
+    impl<UpdateParser, ParserT, Err> MessageParser<UpdateParser, ParserT, Err>
+    where
+        UpdateParser: Parser<Update, Message, UpdateRest>,
+        ParserT: Parser<Message, Message, ()> + 'static,
+        Update: RecombineFrom<UpdateParser, From = Message, Rest = UpdateRest>,
+    {
         pub fn by<F, H, Fut>(
             self,
             f: F,
         ) -> MessageHandler<
-            MapParser<ParentParser, ParserT, Message, UpdateRest, (), Message>,
+            MapParser<UpdateParser, ParserT, Message, UpdateRest, (), Message>,
             H,
             Err,
         >
@@ -109,48 +166,79 @@ mod impls {
             Fut: Future + Send + 'static,
             Fut::Output: Into<HandleResult<Err>>,
         {
-            let MessageParser { parent, parser, guards, .. } = self;
+            let MessageParser { update_parser: parent, parser, demux, .. } = self;
             let parser = MapParser::new(parent, parser);
             MessageHandler {
                 parser,
                 handler: f.into_handler(),
-                guards,
+                demux: demux.build(),
                 phantom: PhantomData
             }
         }
     }
 
-    impl<ParentParser, ParserT, Err> MessageParser<ParentParser, ParserT, Err> {
+    impl<UpdateParser, ParserT, Err> MessageParser<UpdateParser, ParserT, Err> {
         pub fn with_guard(mut self, guard: impl Guard<Message> + 'static) -> Self {
-            self.guards.add_guard(guard);
+            let prev = self.last_guard.take();
+            if let Some(prev) = prev {
+                self.guards.add_boxed_guard(prev);
+            }
+            self.last_guard = Some(Box::new(guard) as _);
             self
         }
 
-        pub fn with_id(mut self, guard: impl Guard<i32> + 'static) -> Self {
+        pub fn or_else<F, H, HFut>(mut self, func: F) -> Self
+        where
+            F: IntoHandler<H>,
+            H: Handler<Message, Err, HFut> + 'static,
+            HFut: Future + Send + 'static,
+            HFut::Output: Into<HandleResult<Err>> + 'static,
+            Err: 'static
+        {
+            let prev_guard = self.last_guard.take().expect("or_else function must be called after using .with_* funtion!");
+            let wrong_handler = func.into_handler();
+
+            self.create_guards_service();
+            self.demux.add_service(GuardHandler::new(prev_guard, wrong_handler));
+
+            self
+        }
+
+        fn create_guards_service(&mut self) {
+            if !self.guards.is_empty() {
+                let mut guards = Guards::new();
+                std::mem::swap(&mut guards, &mut self.guards);
+                self.demux.add_service(GuardsHandler::new(guards));
+            }
+        }
+    }
+
+    impl<UpdateParser, ParserT, Err> MessageParser<UpdateParser, ParserT, Err> {
+        pub fn with_id(self, guard: impl Guard<i32> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 guard.check(&message.id)
             })
         }
 
-        pub fn with_date(mut self, guard: impl Guard<i32> + 'static) -> Self {
+        pub fn with_date(self, guard: impl Guard<i32> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 guard.check(&message.date)
             })
         }
 
-        pub fn with_chat(mut self, guard: impl Guard<types::Chat> + 'static) -> Self {
+        pub fn with_chat(self, guard: impl Guard<types::Chat> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 guard.check(&message.chat)
             })
         }
 
-        pub fn with_chat_id(mut self, guard: impl Guard<i64> + 'static) -> Self {
+        pub fn with_chat_id(self, guard: impl Guard<i64> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 guard.check(&message.chat.id)
             })
         }
 
-        pub fn with_via_bot(mut self, guard: impl Guard<types::User> + 'static) -> Self {
+        pub fn with_via_bot(self, guard: impl Guard<types::User> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 match &message.via_bot {
                     Some(bot) => guard.check(bot),
@@ -159,7 +247,7 @@ mod impls {
             })
         }
 
-        pub fn with_from(mut self, guard: impl Guard<types::User> + 'static) -> Self {
+        pub fn with_from(self, guard: impl Guard<types::User> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 match message.from() {
                     Some(user) => guard.check(user),
@@ -168,7 +256,7 @@ mod impls {
             })
         }
 
-        pub fn with_forward_from(mut self, guard: impl Guard<types::ForwardedFrom> + 'static) -> Self {
+        pub fn with_forward_from(self, guard: impl Guard<types::ForwardedFrom> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 match message.forward_from() {
                     Some(user) => guard.check(user),
@@ -177,7 +265,7 @@ mod impls {
             })
         }
 
-        pub fn with_forward_from_chat(mut self, guard: impl Guard<types::Chat> + 'static) -> Self {
+        pub fn with_forward_from_chat(self, guard: impl Guard<types::Chat> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 match message.forward_from_chat() {
                     Some(chat) => guard.check(chat),
@@ -186,7 +274,7 @@ mod impls {
             })
         }
 
-        pub fn with_forward_from_message_id(mut self, guard: impl Guard<i32> + 'static) -> Self {
+        pub fn with_forward_from_message_id(self, guard: impl Guard<i32> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 match message.forward_from_message_id() {
                     Some(chat) => guard.check(chat),
@@ -195,7 +283,7 @@ mod impls {
             })
         }
 
-        pub fn with_forward_signature(mut self, guard: impl Guard<str> + 'static) -> Self {
+        pub fn with_forward_signature(self, guard: impl Guard<str> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 match message.forward_signature() {
                     Some(chat) => guard.check(chat),
@@ -204,10 +292,19 @@ mod impls {
             })
         }
 
-        pub fn with_forward_date(mut self, guard: impl Guard<i32> + 'static) -> Self {
+        pub fn with_forward_date(self, guard: impl Guard<i32> + 'static) -> Self {
             self.with_guard(move |message: &Message| {
                 match message.forward_date() {
                     Some(chat) => guard.check(chat),
+                    None => false,
+                }
+            })
+        }
+
+        pub fn with_text(self, guard: impl Guard<str> + 'static) -> Self {
+            self.with_guard(move |message: &Message| {
+                match message.text() {
+                    Some(text) => guard.check(text),
                     None => false,
                 }
             })
@@ -217,7 +314,7 @@ mod impls {
     pub struct MessageHandler<Parser, HandlerT, Err> {
         parser: Parser,
         handler: HandlerT,
-        guards: Guards<Message>,
+        demux: Demux<Message, Err>,
         phantom: PhantomData<Err>,
     }
 
@@ -229,14 +326,9 @@ mod impls {
     {
         fn handle(&self, update: Update) -> Result<HandleFuture<Err>, Update> {
             let ParserOut { data: mes, rest } = self.parser.parse(update)?;
-            if self.guards.check(&mes) {
-                match self.handler.handle(mes) {
-                    Ok(fut) => Ok(fut),
-                    Err(mes) => Err(<Update as RecombineFrom<ParserT>>::recombine(ParserOut::new(mes, rest))),
-                }
-            }
-            else {
-                Err(<Update as RecombineFrom<ParserT>>::recombine(ParserOut::new(mes, rest)))
+            match self.demux.handle(mes) {
+                Ok(fut) => Ok(fut),
+                Err(upd) => self.handler.handle(upd).map_err(|e| <Update as RecombineFrom<ParserT>>::recombine(ParserOut::new(e, rest)))
             }
         }
     }

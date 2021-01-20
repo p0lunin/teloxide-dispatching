@@ -4,10 +4,17 @@ pub trait Guard<Upd: ?Sized> {
 
 impl<F, Upd> Guard<Upd> for F
 where
+    Upd: ?Sized,
     F: Fn(&Upd) -> bool,
 {
     fn check(&self, update: &Upd) -> bool {
         self(update)
+    }
+}
+
+impl<Upd> Guard<Upd> for Box<dyn Guard<Upd>> {
+    fn check(&self, update: &Upd) -> bool {
+        (**self).check(update)
     }
 }
 
@@ -32,7 +39,11 @@ impl<Upd> Guards<Upd> {
     where
         T: Guard<Upd> + 'static,
     {
-        self.guards.push(Box::new(data));
+        self.add_boxed_guard(Box::new(data));
+    }
+
+    pub fn add_boxed_guard(&mut self, data: Box<dyn Guard<Upd>>) {
+        self.guards.push(data);
     }
 
     pub fn check(&self, update: &Upd) -> bool {
@@ -42,6 +53,10 @@ impl<Upd> Guards<Upd> {
     pub fn with(mut self, other: Self) -> Self {
         self.guards.extend(other.guards.into_iter());
         self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.guards.is_empty()
     }
 }
 
