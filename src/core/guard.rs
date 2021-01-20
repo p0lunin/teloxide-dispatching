@@ -65,3 +65,21 @@ impl<Upd> Guard<Upd> for Guards<Upd> {
         self.guards.iter().all(|guard| guard.check(update))
     }
 }
+
+pub struct OrGuard<Left, Right>(Left, Right);
+
+impl<Left, Right> OrGuard<Left, Right> {
+    pub fn new(left: Left, right: Right) -> Self {
+        OrGuard(left, right)
+    }
+}
+
+impl<Left, Right, Upd> Guard<Upd> for OrGuard<Left, Right>
+where
+    Left: Guard<Upd>,
+    Right: Guard<Upd>,
+{
+    fn check(&self, update: &Upd) -> bool {
+        self.0.check(update) || self.1.check(update)
+    }
+}
