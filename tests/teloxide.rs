@@ -31,16 +31,17 @@ async fn or_else() {
     let in_or_else = Arc::new(AtomicBool::new(false));
 
     let dispatcher = DispatcherBuilder::<Update, Infallible, _, _>::new()
-        .handle(updates::message()
-            .common()
-            .with_text(|text: &str| text == "text")
-            .or_else({
-                let in_or_else = in_or_else.clone();
-                move || {
-                    in_or_else.store(true, Ordering::SeqCst);
-                }
-            })
-            .by(|| unreachable!())
+        .handle(
+            updates::message()
+                .common()
+                .with_text(|text: &str| text == "text")
+                .or_else({
+                    let in_or_else = in_or_else.clone();
+                    move || {
+                        in_or_else.store(true, Ordering::SeqCst);
+                    }
+                })
+                .by(|| unreachable!()),
         )
         .error_handler(|_| async { unreachable!() })
         .build();
@@ -57,14 +58,15 @@ async fn or() {
     let handled = Arc::new(AtomicBool::new(false));
 
     let dispatcher = DispatcherBuilder::<Update, Infallible, _, _>::new()
-        .handle(updates::message()
-            .common()
-            .with_text(|text: &str| text == "text")
-            .or_with_text(|text: &str| text == "text2")
-            .by({
-                let handled = handled.clone();
-                move || handled.store(true, Ordering::SeqCst)
-            })
+        .handle(
+            updates::message()
+                .common()
+                .with_text(|text: &str| text == "text")
+                .or_with_text(|text: &str| text == "text2")
+                .by({
+                    let handled = handled.clone();
+                    move || handled.store(true, Ordering::SeqCst)
+                }),
         )
         .error_handler(|_| async { unreachable!() })
         .build();
@@ -75,7 +77,6 @@ async fn or() {
 
     assert!(handled.load(Ordering::SeqCst));
 }
-
 
 fn text_message<T: Into<String>>(text: T) -> Message {
     use teloxide_core::types::ChatKind::Private;

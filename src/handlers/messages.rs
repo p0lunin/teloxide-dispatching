@@ -1,12 +1,15 @@
 mod impls {
-    use crate::core::{HandleResult, Handler, IntoHandler, MapParser, Parser, ParserOut, RecombineFrom, Guards, Guard, HandleFuture, Demux, DemuxBuilder, OrGuard};
+    use crate::core::{
+        Demux, DemuxBuilder, Guard, Guards, HandleFuture, HandleResult, Handler, IntoHandler,
+        MapParser, OrGuard, Parser, ParserOut, RecombineFrom,
+    };
     use crate::handlers::parser::UpdateParser;
     use crate::updates::UpdateRest;
+    use futures::FutureExt;
     use std::future::Future;
     use std::marker::PhantomData;
-    use teloxide_core::types::{Message, Update};
     use teloxide_core::types;
-    use futures::FutureExt;
+    use teloxide_core::types::{Message, Update};
 
     pub(crate) mod parser {
         pub struct Common;
@@ -88,7 +91,7 @@ mod impls {
         fn handle(&self, data: Message) -> Result<HandleFuture<Err>, Message> {
             match self.guards.check(&data) {
                 true => Err(data),
-                false => Ok(Box::pin(async { HandleResult::Ok }))
+                false => Ok(Box::pin(async { HandleResult::Ok })),
             }
         }
     }
@@ -101,11 +104,16 @@ mod impls {
 
     impl<Guard, Handler, Err, HFut> GuardHandler<Guard, Handler, Err, HFut> {
         pub fn new(guard: Guard, wrong_handler: Handler) -> Self {
-            GuardHandler { guard, wrong_handler, phantom: PhantomData }
+            GuardHandler {
+                guard,
+                wrong_handler,
+                phantom: PhantomData,
+            }
         }
     }
 
-    impl<GuardT, HandlerT, Err, HFut> Handler<Message, Err, HandleFuture<Err>> for GuardHandler<GuardT, HandlerT, Err, HFut>
+    impl<GuardT, HandlerT, Err, HFut> Handler<Message, Err, HandleFuture<Err>>
+        for GuardHandler<GuardT, HandlerT, Err, HFut>
     where
         GuardT: Guard<Message>,
         HandlerT: Handler<Message, Err, HFut>,
@@ -116,7 +124,10 @@ mod impls {
         fn handle(&self, data: Message) -> Result<HandleFuture<Err>, Message> {
             match self.guard.check(&data) {
                 true => Err(data),
-                false => self.wrong_handler.handle(data).map(|fut| Box::pin(fut.map(Into::into)) as _)
+                false => self
+                    .wrong_handler
+                    .handle(data)
+                    .map(|fut| Box::pin(fut.map(Into::into)) as _),
             }
         }
     }
@@ -126,7 +137,7 @@ mod impls {
         parser: ParserT,
         demux: DemuxBuilder<Message, Err>,
         guards: Guards<Message>,
-        last_guard: Option<Box<dyn Guard<Message>>>
+        last_guard: Option<Box<dyn Guard<Message>>>,
     }
 
     impl<UpdateParser, ParserT, Err> MessageParser<UpdateParser, ParserT, Err>
@@ -166,13 +177,18 @@ mod impls {
             Fut: Future + Send + 'static,
             Fut::Output: Into<HandleResult<Err>>,
         {
-            let MessageParser { update_parser: parent, parser, demux, .. } = self;
+            let MessageParser {
+                update_parser: parent,
+                parser,
+                demux,
+                ..
+            } = self;
             let parser = MapParser::new(parent, parser);
             MessageHandler {
                 parser,
                 handler: f.into_handler(),
                 demux: demux.build(),
-                phantom: PhantomData
+                phantom: PhantomData,
             }
         }
     }
@@ -188,7 +204,10 @@ mod impls {
         }
 
         pub fn or(mut self, guard: impl Guard<Message> + 'static) -> Self {
-            let prev = self.last_guard.take().expect("or function must be called after using .with_* funtion!");
+            let prev = self
+                .last_guard
+                .take()
+                .expect("or function must be called after using .with_* funtion!");
             self.last_guard = Some(Box::new(OrGuard::new(prev, guard)) as _);
             self
         }
@@ -199,13 +218,17 @@ mod impls {
             H: Handler<Message, Err, HFut> + 'static,
             HFut: Future + Send + 'static,
             HFut::Output: Into<HandleResult<Err>> + 'static,
-            Err: 'static
+            Err: 'static,
         {
-            let prev_guard = self.last_guard.take().expect("or_else function must be called after using .with_* funtion!");
+            let prev_guard = self
+                .last_guard
+                .take()
+                .expect("or_else function must be called after using .with_* funtion!");
             let wrong_handler = func.into_handler();
 
             self.create_guards_service();
-            self.demux.add_service(GuardHandler::new(prev_guard, wrong_handler));
+            self.demux
+                .add_service(GuardHandler::new(prev_guard, wrong_handler));
 
             self
         }
@@ -221,196 +244,155 @@ mod impls {
 
     impl<UpdateParser, ParserT, Err> MessageParser<UpdateParser, ParserT, Err> {
         pub fn with_id(self, guard: impl Guard<i32> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                guard.check(&message.id)
-            })
+            self.with_guard(move |message: &Message| guard.check(&message.id))
         }
 
         pub fn with_date(self, guard: impl Guard<i32> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                guard.check(&message.date)
-            })
+            self.with_guard(move |message: &Message| guard.check(&message.date))
         }
 
         pub fn with_chat(self, guard: impl Guard<types::Chat> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                guard.check(&message.chat)
-            })
+            self.with_guard(move |message: &Message| guard.check(&message.chat))
         }
 
         pub fn with_chat_id(self, guard: impl Guard<i64> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                guard.check(&message.chat.id)
-            })
+            self.with_guard(move |message: &Message| guard.check(&message.chat.id))
         }
 
         pub fn with_via_bot(self, guard: impl Guard<types::User> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                match &message.via_bot {
-                    Some(bot) => guard.check(bot),
-                    None => false,
-                }
+            self.with_guard(move |message: &Message| match &message.via_bot {
+                Some(bot) => guard.check(bot),
+                None => false,
             })
         }
 
         pub fn with_from(self, guard: impl Guard<types::User> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                match message.from() {
-                    Some(user) => guard.check(user),
-                    None => false,
-                }
+            self.with_guard(move |message: &Message| match message.from() {
+                Some(user) => guard.check(user),
+                None => false,
             })
         }
 
         pub fn with_forward_from(self, guard: impl Guard<types::ForwardedFrom> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                match message.forward_from() {
-                    Some(user) => guard.check(user),
-                    None => false,
-                }
+            self.with_guard(move |message: &Message| match message.forward_from() {
+                Some(user) => guard.check(user),
+                None => false,
             })
         }
 
         pub fn with_forward_from_chat(self, guard: impl Guard<types::Chat> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                match message.forward_from_chat() {
-                    Some(chat) => guard.check(chat),
-                    None => false,
-                }
+            self.with_guard(move |message: &Message| match message.forward_from_chat() {
+                Some(chat) => guard.check(chat),
+                None => false,
             })
         }
 
         pub fn with_forward_from_message_id(self, guard: impl Guard<i32> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                match message.forward_from_message_id() {
+            self.with_guard(
+                move |message: &Message| match message.forward_from_message_id() {
                     Some(chat) => guard.check(chat),
                     None => false,
-                }
-            })
+                },
+            )
         }
 
         pub fn with_forward_signature(self, guard: impl Guard<str> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                match message.forward_signature() {
-                    Some(chat) => guard.check(chat),
-                    None => false,
-                }
+            self.with_guard(move |message: &Message| match message.forward_signature() {
+                Some(chat) => guard.check(chat),
+                None => false,
             })
         }
 
         pub fn with_forward_date(self, guard: impl Guard<i32> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                match message.forward_date() {
-                    Some(chat) => guard.check(chat),
-                    None => false,
-                }
+            self.with_guard(move |message: &Message| match message.forward_date() {
+                Some(chat) => guard.check(chat),
+                None => false,
             })
         }
 
         pub fn with_text(self, guard: impl Guard<str> + 'static) -> Self {
-            self.with_guard(move |message: &Message| {
-                match message.text() {
-                    Some(text) => guard.check(text),
-                    None => false,
-                }
+            self.with_guard(move |message: &Message| match message.text() {
+                Some(text) => guard.check(text),
+                None => false,
             })
         }
     }
 
     impl<UpdateParser, ParserT, Err> MessageParser<UpdateParser, ParserT, Err> {
         pub fn or_with_id(self, guard: impl Guard<i32> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                guard.check(&message.id)
-            })
+            self.or(move |message: &Message| guard.check(&message.id))
         }
 
         pub fn or_with_date(self, guard: impl Guard<i32> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                guard.check(&message.date)
-            })
+            self.or(move |message: &Message| guard.check(&message.date))
         }
 
         pub fn or_with_chat(self, guard: impl Guard<types::Chat> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                guard.check(&message.chat)
-            })
+            self.or(move |message: &Message| guard.check(&message.chat))
         }
 
         pub fn or_with_chat_id(self, guard: impl Guard<i64> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                guard.check(&message.chat.id)
-            })
+            self.or(move |message: &Message| guard.check(&message.chat.id))
         }
 
         pub fn or_with_via_bot(self, guard: impl Guard<types::User> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                match &message.via_bot {
-                    Some(bot) => guard.check(bot),
-                    None => false,
-                }
+            self.or(move |message: &Message| match &message.via_bot {
+                Some(bot) => guard.check(bot),
+                None => false,
             })
         }
 
         pub fn or_with_from(self, guard: impl Guard<types::User> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                match message.from() {
-                    Some(user) => guard.check(user),
-                    None => false,
-                }
+            self.or(move |message: &Message| match message.from() {
+                Some(user) => guard.check(user),
+                None => false,
             })
         }
 
-        pub fn or_with_forward_from(self, guard: impl Guard<types::ForwardedFrom> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                match message.forward_from() {
-                    Some(user) => guard.check(user),
-                    None => false,
-                }
+        pub fn or_with_forward_from(
+            self,
+            guard: impl Guard<types::ForwardedFrom> + 'static,
+        ) -> Self {
+            self.or(move |message: &Message| match message.forward_from() {
+                Some(user) => guard.check(user),
+                None => false,
             })
         }
 
         pub fn or_with_forward_from_chat(self, guard: impl Guard<types::Chat> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                match message.forward_from_chat() {
-                    Some(chat) => guard.check(chat),
-                    None => false,
-                }
+            self.or(move |message: &Message| match message.forward_from_chat() {
+                Some(chat) => guard.check(chat),
+                None => false,
             })
         }
 
         pub fn or_with_forward_from_message_id(self, guard: impl Guard<i32> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                match message.forward_from_message_id() {
+            self.or(
+                move |message: &Message| match message.forward_from_message_id() {
                     Some(chat) => guard.check(chat),
                     None => false,
-                }
-            })
+                },
+            )
         }
 
         pub fn or_with_forward_signature(self, guard: impl Guard<str> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                match message.forward_signature() {
-                    Some(chat) => guard.check(chat),
-                    None => false,
-                }
+            self.or(move |message: &Message| match message.forward_signature() {
+                Some(chat) => guard.check(chat),
+                None => false,
             })
         }
 
         pub fn or_with_forward_date(self, guard: impl Guard<i32> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                match message.forward_date() {
-                    Some(chat) => guard.check(chat),
-                    None => false,
-                }
+            self.or(move |message: &Message| match message.forward_date() {
+                Some(chat) => guard.check(chat),
+                None => false,
             })
         }
 
         pub fn or_with_text(self, guard: impl Guard<str> + 'static) -> Self {
-            self.or(move |message: &Message| {
-                match message.text() {
-                    Some(text) => guard.check(text),
-                    None => false,
-                }
+            self.or(move |message: &Message| match message.text() {
+                Some(text) => guard.check(text),
+                None => false,
             })
         }
     }
@@ -422,7 +404,8 @@ mod impls {
         phantom: PhantomData<Err>,
     }
 
-    impl<ParserT, Err, HandlerT> Handler<Update, Err, HandleFuture<Err>> for MessageHandler<ParserT, HandlerT, Err>
+    impl<ParserT, Err, HandlerT> Handler<Update, Err, HandleFuture<Err>>
+        for MessageHandler<ParserT, HandlerT, Err>
     where
         ParserT: Parser<Update, Message, (UpdateRest, ())>,
         HandlerT: Handler<Message, Err, HandleFuture<Err>>,
@@ -432,7 +415,9 @@ mod impls {
             let ParserOut { data: mes, rest } = self.parser.parse(update)?;
             match self.demux.handle(mes) {
                 Ok(fut) => Ok(fut),
-                Err(upd) => self.handler.handle(upd).map_err(|e| <Update as RecombineFrom<ParserT>>::recombine(ParserOut::new(e, rest)))
+                Err(upd) => self.handler.handle(upd).map_err(|e| {
+                    <Update as RecombineFrom<ParserT>>::recombine(ParserOut::new(e, rest))
+                }),
             }
         }
     }
